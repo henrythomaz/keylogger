@@ -1,7 +1,7 @@
 const app = document.querySelector("#root");
 
 async function pegarDados() {
-  await fetch("https://feedback-recall-projection-politicians.trycloudflare.com")
+  await fetch(" https://mutual-hydrocodone-graphics-query.trycloudflare.com")
     .then((resposta) => resposta.text())
     .then((textoBruto) => {
       const regex = /\[(.*?)\]/g;

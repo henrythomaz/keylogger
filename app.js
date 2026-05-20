@@ -34,7 +34,7 @@ app.post("/envio", (req, res) => {
   }
 
 
-})
+});
 
 app.get("/", (req, res) => {
   const filePath = path.join(__dirname, 'full-dados.txt');
