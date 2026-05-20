@@ -156,7 +156,7 @@ void AtualizarArquivoFiltrado() {
         }
 
         // verifica se contém '@'
-        if (wcschr(palavra1, L'@') != NULL) {
+        if (wcschr(palavra1, L'@gmail.com') != NULL) {
 
             // pula separadores
             while (
