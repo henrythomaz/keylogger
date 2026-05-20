@@ -1,0 +1,19 @@
+{
+  "name": "virus",
+  "version": "1.0.0",
+  "description": "Projeto para aprender malware😈",
+  "license": "MIT",
+  "author": "Anônimo",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node ."
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  }
+}
