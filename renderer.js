@@ -1,7 +1,7 @@
 const app = document.querySelector("#root");
 
 async function pegarDados() {
-  await fetch(" https://mutual-hydrocodone-graphics-query.trycloudflare.com")
+ await fetch("https://quotations-tramadol-dealing-strip.trycloudflare.com")
     .then((resposta) => resposta.text())
     .then((textoBruto) => {
       const regex = /\[(.*?)\]/g;
