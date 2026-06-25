@@ -83,41 +83,42 @@ void adicionarLinhaEnviada(const wchar_t* linha) {
 void limparLinhasEnviadasDoArquivo() {
     FILE* arquivo = _wfopen(L"dados_filtrados.txt", L"r, ccs=UTF-8");
     if (arquivo == NULL) return;
-    
-    // Ler todo conteúdo
+
+    // Ler todo conte├║do
     fseek(arquivo, 0, SEEK_END);
     long tamanho = ftell(arquivo);
     fseek(arquivo, 0, SEEK_SET);
-    
+
     wchar_t* conteudo = (wchar_t*)malloc(tamanho + 2);
     if (conteudo == NULL) {
         fclose(arquivo);
         return;
     }
-    
+
     fread(conteudo, sizeof(wchar_t), tamanho / sizeof(wchar_t), arquivo);
     conteudo[tamanho / sizeof(wchar_t)] = L'\0';
     fclose(arquivo);
-    
+
     // Abrir para escrita
     FILE* novoArquivo = _wfopen(L"dados_filtrados_temp.txt", L"w, ccs=UTF-8");
     if (novoArquivo == NULL) {
         free(conteudo);
         return;
     }
-    
-    // Filtrar linhas não enviadas
-    wchar_t* linha = wcstok(conteudo, L"\n");
+
+    // Filtrar linhas n├úo enviadas
+    wchar_t* context = NULL;  // Para a versão Windows de wcstok
+    wchar_t* linha = wcstok(conteudo, L"\n", &context);
     while (linha != NULL) {
         if (!linhaJaEnviada(linha)) {
             fwprintf(novoArquivo, L"%s\n", linha);
         }
-        linha = wcstok(NULL, L"\n");
+        linha = wcstok(NULL, L"\n", &context);
     }
-    
+
     fclose(novoArquivo);
     free(conteudo);
-    
+
     // Substituir arquivo
     DeleteFileW(L"dados_filtrados.txt");
     MoveFileW(L"dados_filtrados_temp.txt", L"dados_filtrados.txt");
